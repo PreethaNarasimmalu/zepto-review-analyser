@@ -11,6 +11,7 @@ import random
 from datetime import datetime, timezone
 
 from zepto_discovery import config
+from zepto_discovery.util import parse_iso_datetime
 
 
 def recency_chunk(review_date, run_date, window_days=None, chunks=None):
@@ -23,17 +24,9 @@ def recency_chunk(review_date, run_date, window_days=None, chunks=None):
     return min(max(idx, 0), chunks - 1)
 
 
-def _parse_date(value):
-    if isinstance(value, datetime):
-        dt = value
-    else:
-        dt = datetime.fromisoformat(value)
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
 def _stratum_key(review, run_date):
     rating = review.get("rating")
-    chunk = recency_chunk(_parse_date(review["date"]), run_date)
+    chunk = recency_chunk(parse_iso_datetime(review["date"]), run_date)
     return (rating, chunk)
 
 

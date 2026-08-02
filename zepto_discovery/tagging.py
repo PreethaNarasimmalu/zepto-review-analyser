@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 from zepto_discovery import config
 from zepto_discovery.grok_client import chat_completion
+from zepto_discovery.llm_utils import strip_code_fence
 
 REQUIRED_FIELDS = {"review_id", "category", "sentiment", "theme_tags"}
 VALID_SENTIMENTS = {"positive", "negative", "neutral", "mixed"}
@@ -43,15 +44,6 @@ def build_stage1_messages(batch):
     ]
 
 
-def _strip_code_fence(text):
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
-    return text.strip()
-
-
 def parse_stage1_response(raw_text, expected_ids):
     """Parses and validates the model's JSON array against expected_ids.
 
@@ -60,7 +52,7 @@ def parse_stage1_response(raw_text, expected_ids):
     whether to retry.
     """
     try:
-        parsed = json.loads(_strip_code_fence(raw_text))
+        parsed = json.loads(strip_code_fence(raw_text))
     except json.JSONDecodeError as e:
         raise ValueError(f"Stage 1 response was not valid JSON: {e}") from e
 

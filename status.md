@@ -3,10 +3,11 @@
 ## Current status
 
 Phase 0 (repo scaffolding), Phase 1 (scraping), Phase 2 (filtering),
-Phase 3 (sampling), and Phase 4 (Stage 1 tagging, plus the key
-rotation/failover client from Phase 7, built alongside it as the
-architecture doc specifies) complete and tested. Waiting on explicit
-approval before starting Phase 5 (Stage 2 clustering).
+Phase 3 (sampling), Phase 4 (Stage 1 tagging + the key rotation/failover
+client from Phase 7), and Phase 5 (Stage 2 clustering) complete and
+tested — including a full Phase 1-5 integration test chaining the real
+functions together, not just isolated unit tests. Waiting on explicit
+approval before starting Phase 6 (Stage 3 synthesis).
 
 ## What's been built
 
@@ -93,6 +94,37 @@ approval before starting Phase 5 (Stage 2 clustering).
 - `save_tagged()` writes `reviews_tagged_<run_date>.json` to
   `data/tagged/` — this is the schema Phase 5/6/8/10 all read from.
 
+**Phase 5**
+- `zepto_discovery/clustering.py` — `filter_by_timeframe()` filters the
+  tagged pool by date (no re-sampling) for 7/30/90-day windows;
+  `aggregate_tags()` groups Stage 1's raw `theme_tags` by exact text
+  (case/whitespace-insensitive) into a frequency-ranked list with a few
+  example review IDs each, capped to the top `max_tags` (200 by default)
+  to keep the prompt compact; `build_stage2_messages()` prompts for 8-12
+  bottom-up themes without ever mentioning the 8 research questions;
+  `parse_stage2_response()` validates schema and rejects any theme citing
+  a review_id outside the filtered window (catches hallucinated
+  citations, not just malformed JSON); `cluster_themes()` retries once on
+  a bad response, same pattern as Stage 1.
+- `get_or_compute_themes()` is the lazy-cached entry point: loads
+  `themes_<run_date>_<timeframe>d.json` from `data/clustered/` if it
+  already exists, otherwise computes (1 LLM call) and saves it — this is
+  what makes re-selecting an already-computed timeframe in the Phase 8 UI
+  free.
+- Refactored two small pieces of duplicated logic out to shared modules
+  while building this, since Phase 5 needed both: `zepto_discovery/util.py`
+  (`parse_iso_datetime`, now used by both `sampler.py` and
+  `clustering.py`) and `zepto_discovery/llm_utils.py`
+  (`strip_code_fence`, now used by both `tagging.py` and `clustering.py`).
+- `tests/test_pipeline_integration.py` — chains real Phase 1-5 functions
+  together (starting from `scraper._normalize()`'s actual output shape,
+  through `filters.filter_reviews`, `sampler.sample_reviews`,
+  `tagging.tag_reviews`, `clustering.cluster_themes`) to prove each
+  phase's schema is genuinely consumable by the next, not just correct
+  in isolation — confirms date/rating/text survive Phase 1 → 4 → 5
+  unchanged, and that every theme's cited review_id is verified against
+  the real in-window tagged pool.
+
 ## Key decisions taken (and why)
 
 - **Flat package layout** (`zepto_discovery/` at repo root, not
@@ -152,11 +184,30 @@ approval before starting Phase 5 (Stage 2 clustering).
   conversation** (appends the bad response + a correction request),
   not a fresh prompt from scratch — gives the model its own mistake to
   correct against, which is usually more reliable than a cold retry.
+- **Caching is a local-disk cache keyed by (run_date, timeframe_days)**,
+  checked before any LLM call is made. This satisfies the "lazy,
+  cached" requirement now, independent of the external-store decision in
+  `ARCHITECTURE.md` §3 (which is a Phase 8/9 deployment concern for
+  surviving a Streamlit restart) — the two aren't the same thing, and
+  Phase 5 only needed the former to be correct and testable.
+- **Stage 2's schema validation rejects any theme citing a review_id
+  outside the filtered timeframe**, not just malformed JSON — a
+  hallucinated or out-of-window citation would otherwise silently break
+  the "every insight traces to 3-5 real source reviews" requirement
+  further downstream in Stage 3.
+- **Tags are aggregated by exact text match, not fuzzy/semantic
+  grouping** — the near-duplicate-phrase problem this creates (e.g.
+  "late delivery" vs. "delivery delay" as separate entries) is left for
+  the LLM to resolve during clustering, per `ARCHITECTURE.md`'s
+  "aggregated tags, not raw text" instruction; doing semantic grouping
+  ourselves first would pre-empt the bottom-up taxonomy the spec
+  explicitly wants to avoid.
 
 ## Testing performed
 
-- `python3 -m pytest -v` — 60/60 tests pass (5 config + 8 scraper + 15
-  filters + 8 sampler + 11 grok_client + 13 tagging).
+- `python3 -m pytest -v` — 78/78 tests pass (5 config + 8 scraper + 15
+  filters + 8 sampler + 11 grok_client + 13 tagging + 17 clustering + 1
+  full Phase 1-5 integration test).
 - `python3 -m py_compile` on every module — compiles cleanly.
 - Manually verified `.gitignore` behavior: a scratch file dropped into
   `data/raw/` is correctly ignored by `git status`/`git add -A`, while
@@ -212,10 +263,36 @@ approval before starting Phase 5 (Stage 2 clustering).
   date/rating/text intact. This validates the pipeline machinery; it
   does not validate real Grok output quality, which needs the pending
   real-network run above.
+- **Phase 5 spot-check** generated a synthetic tagged pool of 400
+  reviews across 10 realistic theme categories (delivery speed, produce
+  quality, customer support, app stability, pricing, category discovery,
+  packaging, notifications, staff behavior, dark store availability),
+  spread over 90 days with more volume in recent days, and ran
+  `get_or_compute_themes()` for all three timeframes through a
+  keyword-based clustering stand-in (same synthetic-data caveat as
+  Phases 1-4). Results: pool sizes correctly shrank with the window
+  (400 -> 298 -> 127), all three windows landed at exactly 10 themes
+  (within the 8-12 expected range) with no near-empty catch-all bucket,
+  and exactly 3 LLM calls were made total — one per fresh timeframe.
+  Re-selecting the already-computed 90-day window afterward made 0 new
+  calls, confirming the cache works. Manually traced 3 example
+  review_ids per theme (30 total) back to their actual tagged content —
+  all 30 correctly belonged to the theme that cited them. In this
+  particular synthetic distribution the 7-day window had enough volume
+  (127 reviews) to stay above the thin-window threshold, so the guard
+  didn't trip here — its logic is separately confirmed by a dedicated
+  unit test with a deliberately sparse pool; whether it trips on the
+  real 90-day sample depends on Zepto's actual review volume, unknowable
+  until the pending real-network run happens.
+- **Integration confirmed, not just assumed**: `test_pipeline_integration.py`
+  runs actual Phase 1 (`scraper._normalize`) -> Phase 2 (`filter_reviews`)
+  -> Phase 3 (`sample_reviews`) -> Phase 4 (`tag_reviews`) -> Phase 5
+  (`cluster_themes`) in one chain and asserts the schema handoffs hold at
+  every step, not just that each phase works alone.
 
 ## What's next
 
-Phase 5 — Stage 2 Clustering, pending explicit approval to start. Also
+Phase 6 — Stage 3 Synthesis, pending explicit approval to start. Also
 still pending: real-network runs of Phase 1's scraper and Phase 4's Grok
-client/batch-size confirmation, and re-running the Phase 2/3/4
+client/batch-size confirmation, and re-running the Phase 2/3/4/5
 spot-checks against that real data once available.
