@@ -2,14 +2,12 @@
 
 ## Current status
 
-Phase 0 (repo scaffolding), Phase 1 (scraping), Phase 2 (filtering),
-Phase 3 (sampling), Phase 4 (Stage 1 tagging + the key rotation/failover
-client from Phase 7), Phase 5 (Stage 2 clustering), and Phase 6 (Stage 3
-synthesis) complete and tested — including a full Phase 1-6 integration
-test chaining the real functions together end to end, not just isolated
-unit tests. Waiting on explicit approval before starting Phase 8
-(Streamlit UI) — Phase 7 (key rotation) was already built alongside
-Phase 4, per the architecture doc.
+Phases 0-7 complete and tested (repo scaffolding, scraping, filtering,
+sampling, Stage 1 tagging + key rotation/failover, Stage 2 clustering,
+Stage 3 synthesis), plus Phase 8 (Streamlit UI) — built, unit-tested,
+and actually launched and driven in a real browser via Playwright to
+confirm it works, not just that it compiles. Waiting on explicit
+approval before starting Phase 9 (Deployment).
 
 ## What's been built
 
@@ -157,6 +155,33 @@ Phase 4, per the architecture doc.
   "thin-window guard carries through into Stage 3" test the
   architecture doc specifically calls for.
 
+**Phase 8**
+- `zepto_discovery/run_data.py` — pure-Python data-loading layer between
+  disk and the UI, kept separate from `app/main.py` so it's unit-testable
+  without a Streamlit runtime: `latest_run_date()` (most recent run with
+  completed tagging), `funnel_counts()` (per-stage review counts),
+  `load_tagged_reviews()`, `load_timeframe_view()` (loads cached
+  themes/answers for a timeframe if present), and
+  `ensure_timeframe_computed()` (computes+caches whichever of
+  themes/answers is missing for a timeframe, reusing Phase 5/6's
+  `get_or_compute_*` functions directly).
+- `app/main.py` — full UI: sidebar with a "Run new pipeline" button
+  (runs the real Phase 1-4 chain, wrapped so any failure shows a clean
+  error instead of crashing); funnel metrics (scraped → filtered →
+  sampled → tagged); a 7/30/90-day radio selector that computes a
+  timeframe on first selection (with a spinner) and reuses the cache on
+  repeat selection; the 8 research questions as expandable panels
+  showing the answer and its 3-5 supporting reviews (theme, excerpt,
+  review_id); a theme browser (expandable, showing description +
+  example review IDs); and an ad-hoc question box that's present but
+  **intentionally disabled** with a "Coming in Phase 10" note — Phase 10
+  (re-query) hasn't been built yet, so this box isn't wired to anything
+  real rather than half-implementing that phase early.
+- `.streamlit/config.toml` — Zepto's violet-purple theme
+  (`primaryColor = "#7C1FE0"`), the same palette used in the earlier
+  architecture diagram, applied via Streamlit's standard theme config
+  rather than custom CSS injection.
+
 ## Key decisions taken (and why)
 
 - **Flat package layout** (`zepto_discovery/` at repo root, not
@@ -246,12 +271,26 @@ Phase 4, per the architecture doc.
   bare ID, and keeps Stage 2 and Stage 3 loosely coupled (Stage 3 only
   needs a theme's name/description/count/example_review_ids, not
   Stage 2's internal aggregation details).
+- **The ad-hoc question box is built but deliberately disabled**, not
+  skipped and not half-wired to a stub — visible in the UI so the shape
+  of the eventual feature is clear, but not implemented, since Phase 10
+  hasn't been approved yet.
+- **The "Run new pipeline" button runs the real Phase 1-4 chain**, not
+  a mocked demo path — it's wrapped in a try/except that surfaces
+  whatever error comes back (missing secrets, network failure, Grok
+  errors) as a clean sidebar message instead of a crash, since this
+  environment can't run it successfully end-to-end anyway (see below)
+  and a real deployment needs this failure path to work regardless.
+- **Streamlit's own `[theme]` config**, not raw CSS injection, for the
+  Zepto brand palette — simpler, and Streamlit already re-applies it
+  consistently across all built-in widgets (radio buttons, buttons,
+  expanders) rather than needing every component individually restyled.
 
 ## Testing performed
 
-- `python3 -m pytest -v` — 93/93 tests pass (5 config + 8 scraper + 15
+- `python3 -m pytest -v` — 101/101 tests pass (5 config + 8 scraper + 15
   filters + 8 sampler + 11 grok_client + 13 tagging + 17 clustering + 15
-  synthesis + 1 full Phase 1-6 integration test).
+  synthesis + 8 run_data + 1 full Phase 1-6 integration test).
 - `python3 -m py_compile` on every module — compiles cleanly.
 - Manually verified `.gitignore` behavior: a scratch file dropped into
   `data/raw/` is correctly ignored by `git status`/`git add -A`, while
@@ -344,11 +383,38 @@ Phase 4, per the architecture doc.
   in one chain, for both a normal and a thin timeframe, and asserts the
   schema handoffs hold at every step — not just that each phase works
   alone.
+- **Phase 8 was actually launched and driven in a real browser**, not
+  just unit-tested: generated a synthetic completed run (500 reviews
+  through the real Phase 1-6 modules), started the app with
+  `streamlit run app/main.py`, and drove it headlessly via Playwright
+  against the pre-installed Chromium. Confirmed: the funnel metrics
+  show correctly (500/500/500/500); all three timeframe radio buttons
+  switch and show correctly different pool sizes (500 / 359 / 150) and
+  theme counts; expanding a research question shows its answer and 3
+  supporting reviews with theme/excerpt/review_id; expanding a theme
+  shows its description and example review IDs; the Zepto violet-purple
+  theme renders throughout (selected radio buttons, headers). No console
+  page errors — the only console output was Streamlit's own telemetry
+  beacon failing, which is this sandbox's network policy blocking
+  Streamlit's phone-home, unrelated to the app.
+- **Cross-phase integration caught live, not just in tests**: clicking
+  "Run new pipeline" triggers a real Phase 1 scrape attempt, which fails
+  against this sandbox's blocked network — and Phase 1's empty-first-page
+  guard (built in an earlier session) fired correctly, surfacing its
+  exact error message as a clean sidebar banner instead of crashing the
+  app, with the existing good demo data left completely undisturbed
+  underneath it. This is Phase 1 and Phase 8 working together correctly
+  under a real failure, not two phases that merely both pass in
+  isolation.
+- One gap not yet exercised in the browser: the thin-window caution
+  banner (`is_thin`) — none of the three demo timeframes happened to
+  fall under the 50-review threshold. The underlying flag is unit-tested
+  directly; only the one-line `st.warning(...)` rendering itself wasn't
+  screenshotted.
 
 ## What's next
 
-Phase 8 — Streamlit UI, pending explicit approval to start (Phase 7 was
-already built alongside Phase 4). Also still pending: real-network runs
-of Phase 1's scraper and Phase 4's Grok client/batch-size confirmation,
-and re-running the Phase 2/3/4/5/6 spot-checks against that real data
-once available.
+Phase 9 — Deployment, pending explicit approval to start. Also still
+pending: real-network runs of Phase 1's scraper and Phase 4's Grok
+client/batch-size confirmation, and re-running the Phase 2/3/4/5/6
+spot-checks against that real data once available.
