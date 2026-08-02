@@ -33,7 +33,7 @@ MAX_SUPPORTING = 5
 EXCERPT_LENGTH = 160
 
 
-def _theme_blocks(themes, tagged_reviews):
+def theme_blocks(themes, tagged_reviews):
     by_id = {r["review_id"]: r for r in tagged_reviews}
     blocks = []
     for theme in themes:
@@ -70,7 +70,7 @@ def build_stage3_messages(themes, tagged_reviews):
     )
     user = (
         "Clustered themes:\n"
-        + json.dumps(_theme_blocks(themes, tagged_reviews), ensure_ascii=False)
+        + json.dumps(theme_blocks(themes, tagged_reviews), ensure_ascii=False)
         + "\n\nQuestions (answer in this exact order):\n"
         + json.dumps(RESEARCH_QUESTIONS)
     )

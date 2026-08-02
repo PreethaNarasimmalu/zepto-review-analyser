@@ -1,6 +1,6 @@
-"""End-to-end integration: chains real Phase 1-6 functions together
-(not hand-rolled shortcuts) to prove each phase's output schema is
-actually consumable by the next phase, not just individually correct.
+"""End-to-end integration: chains real Phase 1-6 and Phase 10 functions
+together (not hand-rolled shortcuts) to prove each phase's output schema
+is actually consumable by the next phase, not just individually correct.
 """
 
 import json as _json
@@ -10,6 +10,7 @@ from zepto_discovery import config
 from zepto_discovery.clustering import cluster_themes, filter_by_timeframe
 from zepto_discovery.filters import filter_reviews
 from zepto_discovery.grok_client import KeyRotator
+from zepto_discovery.requery import answer_question
 from zepto_discovery.sampler import sample_reviews
 from zepto_discovery.scraper import _normalize
 from zepto_discovery.synthesis import RESEARCH_QUESTIONS, synthesize
@@ -169,7 +170,31 @@ def fake_stage3_http_post(url, headers, json, timeout):
     return llm_response(_json.dumps(answers))
 
 
-def test_full_pipeline_phase1_through_phase6_integration():
+def fake_requery_http_post(url, headers, json, timeout):
+    """Deterministic stand-in for Grok's Phase 10 re-query: cites real
+    review_id/excerpt/theme triples out of the theme data it was given,
+    same as the Stage 3 fake but for a single free-text question."""
+    content = json["messages"][-1]["content"]
+    themes_json = content.split("Clustered themes:\n", 1)[1].split("\n\nQuestion:", 1)[0]
+    themes = _json.loads(themes_json)
+
+    pool = []
+    seen = set()
+    for theme in themes:
+        for ex in theme["example_reviews"]:
+            if ex["review_id"] not in seen:
+                seen.add(ex["review_id"])
+                pool.append({"review_id": ex["review_id"], "excerpt": ex["excerpt"], "theme": theme["name"]})
+
+    k = min(3, len(pool))
+    answer = {
+        "answer": "Synthesized ad-hoc answer grounded in the cited reviews below.",
+        "supporting_reviews": pool[:k],
+    }
+    return llm_response(_json.dumps(answer))
+
+
+def test_full_pipeline_phase1_through_phase10_integration():
     raw = build_synthetic_scrape()
 
     filtered, drop_log = filter_reviews(raw)
@@ -231,3 +256,30 @@ def test_full_pipeline_phase1_through_phase6_integration():
         assert 3 <= len(answer["supporting_reviews"]) <= 5
         for support in answer["supporting_reviews"]:
             assert support["review_id"] in tagged_ids_in_7day_window
+
+    # Phase 10 consumes Phase 5's exact output schema (same as Phase 6)
+    # plus Phase 4's tagged reviews — no re-running of any earlier phase.
+    # ARCHITECTURE.md calls for 2-3 novel questions, not among the
+    # original 8, each costing exactly one LLM call.
+    novel_questions = [
+        "Do users mention discovery via banners or push notifications?",
+        "How do users react to out-of-stock items in a category they don't usually shop?",
+        "Is there a difference in exploration behavior between 5-star and 1-star reviewers?",
+    ]
+    call_count = {"n": 0}
+
+    def counting_requery_http_post(url, headers, json, timeout):
+        call_count["n"] += 1
+        return fake_requery_http_post(url, headers, json, timeout)
+
+    for question in novel_questions:
+        assert question not in RESEARCH_QUESTIONS
+        result = answer_question(
+            question, result_90, tagged, rotator, run_date=RUN_DATE, http_post=counting_requery_http_post
+        )
+        assert result["question"] == question
+        assert 3 <= len(result["supporting_reviews"]) <= 5
+        for support in result["supporting_reviews"]:
+            assert support["review_id"] in tagged_ids_in_window
+
+    assert call_count["n"] == len(novel_questions)  # exactly one LLM call per ad-hoc question

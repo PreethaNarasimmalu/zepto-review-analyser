@@ -24,6 +24,7 @@ from zepto_discovery.run_data import (
     load_tagged_reviews,
     load_timeframe_view,
 )
+from zepto_discovery.requery import answer_question
 from zepto_discovery.sampler import sample_reviews, save_sampled
 from zepto_discovery.scraper import save_raw, scrape_reviews
 from zepto_discovery.synthesis import answers_path
@@ -137,11 +138,23 @@ def render_timeframe_view(run_date, timeframe_days):
                 st.markdown(f"- `{review_id}`")
 
     st.header("Ask a question")
-    st.text_input(
-        "Ask an ad-hoc question about these reviews",
-        disabled=True,
-        help="Coming in Phase 10 (re-query) — not yet built.",
-    )
+    st.caption("Answered directly from this timeframe's already-tagged data — one Grok call, no pipeline re-run.")
+    with st.form(key=f"ask_a_question_{timeframe_days}"):
+        question = st.text_input("Ask an ad-hoc question about these reviews")
+        asked = st.form_submit_button("Ask")
+
+    if asked and question.strip():
+        try:
+            with st.spinner("Answering (one Grok call)..."):
+                rotator = KeyRotator(load_api_keys())
+                tagged = load_tagged_reviews(run_date)
+                result = answer_question(question, themes_result, tagged, rotator, run_date=run_date)
+            st.write(result["answer"])
+            st.caption("Supporting reviews")
+            for support in result["supporting_reviews"]:
+                st.markdown(f"- **[{support['theme']}]** _{support['excerpt']}_ — `{support['review_id']}`")
+        except Exception as e:
+            st.error(f"Couldn't answer that question: {e}")
 
 
 def main():

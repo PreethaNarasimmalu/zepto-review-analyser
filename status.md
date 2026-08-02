@@ -2,15 +2,19 @@
 
 ## Current status
 
-Phases 0-8 complete and tested. Phase 9 (Deployment) is built as far as
-it can be from inside this sandbox: pinned dependencies, the Supabase
-persistence layer the earlier storage decision was missing, a secrets
-template, and a full deployment runbook (`DEPLOYMENT.md`). **The actual
-deploy — creating your Supabase project, creating the Streamlit
-Community Cloud app, and entering real secrets — is a manual step only
-you can do**, detailed step-by-step in `DEPLOYMENT.md`. Everything up to
-that point has been built and tested; nothing further can happen here
-without your Streamlit/Supabase accounts and real API keys.
+**Every phase in `ARCHITECTURE.md` is now built and tested (Phases
+0-10).** Phase 9 (Deployment) is built as far as it can be from inside
+this sandbox: pinned dependencies, the Supabase persistence layer the
+earlier storage decision was missing, a secrets template, and a full
+deployment runbook (`DEPLOYMENT.md`). **The one thing left is entirely
+manual and outside this session's reach: creating your Supabase
+project, creating the Streamlit Community Cloud app, entering real
+secrets, and deploying** — detailed step-by-step in `DEPLOYMENT.md`.
+Nothing further can happen on that specific front without your
+Streamlit/Supabase accounts and real API keys. Everything else —
+scraping, filtering, sampling, tagging, clustering, synthesis, the UI,
+and now ad-hoc re-query — is built, unit-tested, integration-tested
+across the full chain, and (for the UI) browser-tested.
 
 ## What's been built
 
@@ -215,6 +219,28 @@ without your Streamlit/Supabase accounts and real API keys.
   Cloud app creation, entering real secrets), plus a smoke-test
   checklist matching `ARCHITECTURE.md`'s Phase 9 testing requirement.
 
+**Phase 10**
+- `zepto_discovery/requery.py` — answers one free-text ad-hoc question
+  against an already-computed timeframe's clustered themes and tagged
+  reviews. Reuses Stage 3's schema/constants directly
+  (`MIN_SUPPORTING`/`MAX_SUPPORTING`/`REQUIRED_SUPPORT_FIELDS`/
+  `theme_blocks()`, made public from `synthesis.py` for this) rather than
+  duplicating the validation logic: same `{question, answer,
+  supporting_reviews}` shape, same 3-5-real-citations requirement, same
+  thin-pool preflight guard, same one-retry-then-error pattern. Exactly
+  one LLM call per question — no earlier phase re-runs, and no result is
+  cached (each ad-hoc question is arbitrary free text, unlike the fixed
+  8 questions Stage 3 answers per timeframe).
+- Wired into `app/main.py`: the "Ask a question" box from Phase 8 (which
+  was intentionally left disabled with a "Coming in Phase 10" note) is
+  now a working form, scoped to whichever timeframe is currently
+  selected.
+- Extended `tests/test_pipeline_integration.py` to chain Phase 10 onto
+  the existing real Phase 1-6 chain: asks 3 novel questions (not among
+  the original 8) against the real `cluster_themes()` output from that
+  same test, confirming exactly one LLM call per question and that every
+  citation traces to the real in-window tagged pool.
+
 ## Key decisions taken (and why)
 
 - **Flat package layout** (`zepto_discovery/` at repo root, not
@@ -339,13 +365,25 @@ without your Streamlit/Supabase accounts and real API keys.
   this sandbox's network policy, same as `play.google.com`/`api.x.ai`)
   — flagged explicitly in `DEPLOYMENT.md`'s smoke-test checklist as the
   first real-world check.
+- **Phase 10 reuses Stage 3's schema/constants rather than
+  re-implementing them** — `MIN_SUPPORTING`, `MAX_SUPPORTING`,
+  `REQUIRED_SUPPORT_FIELDS`, and `theme_blocks()` are imported straight
+  from `synthesis.py`. An ad-hoc question is answered with the exact
+  same evidence-citation contract as the 8 fixed questions, so the UI
+  can render both with identical code and a user can't tell which path
+  produced an answer just by looking at its shape.
+- **No caching for ad-hoc answers** — unlike Phase 5/6's fixed,
+  enumerable (timeframe × 8-question) result space, ad-hoc questions are
+  arbitrary free text with no natural cache key, and `ARCHITECTURE.md`
+  only asks for "one call per question," not caching. Re-asking the same
+  question re-answers it fresh.
 
 ## Testing performed
 
-- `python3 -m pytest -v` — 109/109 tests pass (5 config + 8 scraper + 15
+- `python3 -m pytest -v` — 120/120 tests pass (5 config + 8 scraper + 15
   filters + 8 sampler + 11 grok_client + 13 tagging + 17 clustering + 15
-  synthesis + 8 run_data + 8 external_store + 1 full Phase 1-6
-  integration test).
+  synthesis + 8 run_data + 8 external_store + 11 requery + 1 full
+  Phase 1-10 integration test).
 - `python3 -m py_compile` on every module — compiles cleanly.
 - Manually verified `.gitignore` behavior: a scratch file dropped into
   `data/raw/` is correctly ignored by `git status`/`git add -A`, while
@@ -487,14 +525,26 @@ without your Streamlit/Supabase accounts and real API keys.
   real-world smoke test (`DEPLOYMENT.md`'s checklist) — all of that
   needs the user's own accounts and is documented step-by-step there
   instead of attempted here.
+- **Phase 10 browser-tested live**: submitted a real ad-hoc question
+  ("Do users mention discovery via banners or push notifications?")
+  through the now-enabled form against the same demo run used for
+  Phase 8/9 testing. It correctly reached `load_api_keys()` and failed
+  with the specific "GROK_API_KEYS not found in Streamlit secrets"
+  message, rendered as a clean inline error with no crash — this is a
+  *different* failure path than "Run new pipeline"'s (which always hits
+  the network-blocked scrape first and never reaches the secrets check).
+  Phase 10 doesn't scrape anything, so this was the first point in this
+  whole build where the missing-secrets error path was actually
+  exercised, not just inferred.
 
 ## What's next
 
-Deployment itself (the manual steps in `DEPLOYMENT.md`) is up to the
-user now — nothing further to build there without real accounts/keys.
-Pending the user's go-ahead: Phase 10 (re-query), which is the only
-remaining phase in `ARCHITECTURE.md`. Also still outstanding, same as
-every phase since Phase 1: real-network runs of the scraper and Grok
-client (including the batch-size confirmation), and re-running the
-Phase 2-6 spot-checks against that real data once available — all
-achievable once the app is actually deployed per `DEPLOYMENT.md`.
+**Every phase in `ARCHITECTURE.md` is built and tested.** What's left is
+entirely the user's: working through `DEPLOYMENT.md`'s manual steps
+(Supabase project/bucket, Streamlit Community Cloud app, real secrets,
+deploy), then its smoke-test checklist — which is also where every
+"pending real-network verification" flagged since Phase 1 finally gets
+resolved: the actual scrape against Play Store, the actual Grok batch-size
+confirmation and output quality, and re-running the Phase 2-6 spot-checks
+against real data instead of synthetic stand-ins. Nothing further can be
+built here without that real deployment existing first.
