@@ -2,8 +2,9 @@
 
 ## Current status
 
-Phase 0 (repo scaffolding) and Phase 1 (scraping) complete and tested.
-Waiting on explicit approval before starting Phase 2 (filtering).
+Phase 0 (repo scaffolding), Phase 1 (scraping), and Phase 2 (filtering)
+complete and tested. Waiting on explicit approval before starting Phase 3
+(sampling).
 
 ## What's been built
 
@@ -33,6 +34,22 @@ Waiting on explicit approval before starting Phase 2 (filtering).
   logic (including exact-cutoff and one-day-past-cutoff edge cases) via
   an injectable `fetch_page` seam, plus the save path.
 
+**Phase 2**
+- `zepto_discovery/filters.py` — four independent, testable drop rules:
+  `is_emoji_only`, `is_rating_restatement`, `is_too_short` (< 3 words),
+  `is_generic` (word-count-independent: flags reviews with no token
+  outside a stoplist/generic-adjective/generic-noun set, so a long review
+  made entirely of filler still gets caught, not just short ones).
+  `is_rating_restatement` strips a detected star-rating phrase (e.g. "5
+  stars", "one star") and then reuses the generic-content check on
+  what's left, so "3 stars, good app but expensive" is correctly kept
+  (mentions "expensive") while "1 star worst app" is dropped.
+- `filter_reviews()` runs the rules in a fixed order and records which
+  rule dropped each review (at most one reason per review) — this is the
+  audit trail `ARCHITECTURE.md` asks for.
+- `save_filtered()` writes `reviews_filtered_<run_date>.json` and
+  `drop_log_<run_date>.json` to `data/filtered/`.
+
 ## Key decisions taken (and why)
 
 - **Flat package layout** (`zepto_discovery/` at repo root, not
@@ -59,11 +76,28 @@ Waiting on explicit approval before starting Phase 2 (filtering).
   failed scrape silently look like a successful empty run. An empty page
   after some reviews have already been collected is still treated as a
   normal "ran out of reviews" stop.
+- **Rule check order puts the more specific reasons first**
+  (`emoji_only`, `rating_restatement`, then `too_short`, then `generic`).
+  A pure-emoji review or a bare "5 stars" is technically also
+  "too short," but logging it under `too_short` would be a less useful
+  audit trail than logging its actual, more specific reason — found this
+  while writing the combined-pipeline test, which initially asserted the
+  wrong label for exactly this reason.
+- **`is_generic` is intentionally a stoplist/blacklist, not a
+  whitelist.** It only flags a review if *every* token is in a small
+  generic-adjective/generic-noun/stopword set — anything else (a
+  product name, a category, a specific complaint) keeps it. This means
+  some genuinely vague reviews slip through uncaught (see testing notes
+  below) in exchange for near-zero risk of dropping a substantive one —
+  the safer failure mode for a pre-LLM filter that isn't the final
+  quality bar.
 
 ## Testing performed
 
-- `python3 -m pytest -v` — 13/13 tests pass (5 config + 8 scraper).
-- `python3 -m py_compile app/main.py` / `scraper.py` — compile cleanly.
+- `python3 -m pytest -v` — 28/28 tests pass (5 config + 8 scraper + 15
+  filters).
+- `python3 -m py_compile app/main.py` / `scraper.py` / `filters.py` —
+  compile cleanly.
 - Manually verified `.gitignore` behavior: a scratch file dropped into
   `data/raw/` is correctly ignored by `git status`/`git add -A`, while
   each directory's `.gitkeep` is tracked.
@@ -78,9 +112,22 @@ Waiting on explicit approval before starting Phase 2 (filtering).
   ~20 of them" verification from `ARCHITECTURE.md` still needs to run
   somewhere with real internet access** — locally, or once deployed —
   before Phase 1 can be considered fully verified against real data.
+- **Phase 2 spot-check** ran `filter_reviews()` against ~41 hand-written
+  review-style examples (mix of English/Hinglish, emoji, star-mentions,
+  substantive praise/complaints) since Phase 1 has no real scraped data
+  to run this against yet in this environment. Result: 24 kept / 17
+  dropped. Manually reviewed both lists — no substantive review was
+  wrongly dropped (no over-filtering found). One known gap: `"waste of
+  time"` was kept despite being about as content-free as `"worst app"`,
+  because "waste" and "time" aren't in the generic-word lists — accepted
+  as a minor, safe-direction miss rather than tuned away (see key
+  decisions above). This is a synthetic stand-in for the real
+  ~30-kept/~30-dropped spot-check `ARCHITECTURE.md` calls for — it still
+  needs to be re-run against actual filtered Zepto reviews once Phase 1
+  has real data.
 
 ## What's next
 
-Phase 2 — Filtering, pending explicit approval to start. Also pending: a
-real-network run of Phase 1's scraper to confirm actual review content,
-volume, and field shape look correct (see testing note above).
+Phase 3 — Sampling, pending explicit approval to start. Also pending: a
+real-network run of Phase 1's scraper (to get real data), followed by
+re-running Phase 2's spot-check against that real, filtered output.
