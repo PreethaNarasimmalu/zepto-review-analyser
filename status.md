@@ -4,10 +4,12 @@
 
 Phase 0 (repo scaffolding), Phase 1 (scraping), Phase 2 (filtering),
 Phase 3 (sampling), Phase 4 (Stage 1 tagging + the key rotation/failover
-client from Phase 7), and Phase 5 (Stage 2 clustering) complete and
-tested — including a full Phase 1-5 integration test chaining the real
-functions together, not just isolated unit tests. Waiting on explicit
-approval before starting Phase 6 (Stage 3 synthesis).
+client from Phase 7), Phase 5 (Stage 2 clustering), and Phase 6 (Stage 3
+synthesis) complete and tested — including a full Phase 1-6 integration
+test chaining the real functions together end to end, not just isolated
+unit tests. Waiting on explicit approval before starting Phase 8
+(Streamlit UI) — Phase 7 (key rotation) was already built alongside
+Phase 4, per the architecture doc.
 
 ## What's been built
 
@@ -125,6 +127,36 @@ approval before starting Phase 6 (Stage 3 synthesis).
   unchanged, and that every theme's cited review_id is verified against
   the real in-window tagged pool.
 
+**Phase 6**
+- `zepto_discovery/synthesis.py` — answers the 8 fixed research
+  questions per timeframe from Phase 5's clustered themes. Builds the
+  prompt from `_theme_blocks()`, which looks up each theme's cited
+  `example_review_ids` in the tagged pool to embed a real excerpt per
+  example (this is the actual evidence the model sees, not just an ID).
+  `parse_stage3_response()` enforces the validation requirement in the
+  schema itself: exactly 8 answers, in a fixed order, each with 3-5
+  `supporting_reviews` entries, each a real `{review_id, excerpt, theme}`
+  where the `review_id` is checked against the in-window tagged pool —
+  a hallucinated or out-of-window citation fails validation and triggers
+  the same one-retry-then-error pattern as Stages 1/2.
+- **Pre-flight thin-pool guard**: before making any LLM call,
+  `synthesize()` checks whether the in-window tagged pool even has 3
+  distinct reviews to cite. If not, it raises immediately rather than
+  asking the model to satisfy an impossible 3-5-citation requirement
+  (which would either fail validation repeatedly or tempt the model
+  into fabricating support) — confirmed by a test that asserts the LLM
+  is never called in that case.
+- `get_or_compute_synthesis()` mirrors Phase 5's lazy-cache pattern
+  exactly, writing to `answers_<run_date>_<timeframe>d.json` in
+  `data/synthesis/`.
+- Extended `tests/test_pipeline_integration.py` to chain all the way
+  through Phase 6: `synthesize()` now runs on the real `cluster_themes()`
+  output from the same test, for both the full 90-day window and the
+  thin 7-day window, confirming every answer is schema-valid (exactly 8
+  questions, 3-5 real citations each) in both cases — this is the
+  "thin-window guard carries through into Stage 3" test the
+  architecture doc specifically calls for.
+
 ## Key decisions taken (and why)
 
 - **Flat package layout** (`zepto_discovery/` at repo root, not
@@ -202,12 +234,24 @@ approval before starting Phase 6 (Stage 3 synthesis).
   "aggregated tags, not raw text" instruction; doing semantic grouping
   ourselves first would pre-empt the bottom-up taxonomy the spec
   explicitly wants to avoid.
+- **A thin-pool preflight check happens before the LLM call, not after**
+  — mirrors the philosophy behind Phase 1's empty-first-page guard:
+  don't spend a call (or multiple retries) on a request that's
+  structurally guaranteed to fail its own validation, and don't give the
+  model a reason to invent evidence just to hit a required count.
+- **Stage 3's evidence is looked up from the tagged pool, not just
+  passed through from Stage 2** — `_theme_blocks()` re-fetches each
+  cited review's actual text to build the excerpt shown to the model.
+  This means the model is answering from real quoted text, not just a
+  bare ID, and keeps Stage 2 and Stage 3 loosely coupled (Stage 3 only
+  needs a theme's name/description/count/example_review_ids, not
+  Stage 2's internal aggregation details).
 
 ## Testing performed
 
-- `python3 -m pytest -v` — 78/78 tests pass (5 config + 8 scraper + 15
-  filters + 8 sampler + 11 grok_client + 13 tagging + 17 clustering + 1
-  full Phase 1-5 integration test).
+- `python3 -m pytest -v` — 93/93 tests pass (5 config + 8 scraper + 15
+  filters + 8 sampler + 11 grok_client + 13 tagging + 17 clustering + 15
+  synthesis + 1 full Phase 1-6 integration test).
 - `python3 -m py_compile` on every module — compiles cleanly.
 - Manually verified `.gitignore` behavior: a scratch file dropped into
   `data/raw/` is correctly ignored by `git status`/`git add -A`, while
@@ -284,15 +328,27 @@ approval before starting Phase 6 (Stage 3 synthesis).
   unit test with a deliberately sparse pool; whether it trips on the
   real 90-day sample depends on Zepto's actual review volume, unknowable
   until the pending real-network run happens.
+- **Phase 6 spot-check** extended the same synthetic 400-review, 10-theme
+  pool from the Phase 5 spot-check through `get_or_compute_synthesis()`
+  for all three timeframes, using a keyword-driven stand-in that answers
+  each research question by citing real reviews from the theme most
+  relevant to it. Manually read through the first 3 of 8 answers per
+  timeframe (9 answers, 27 citations total) and traced every cited
+  excerpt back to its actual source review's text — all 27 matched
+  exactly. Pool sizes and thin-window flags carried through from Phase 5
+  unchanged (400/298/127 across the three windows).
 - **Integration confirmed, not just assumed**: `test_pipeline_integration.py`
-  runs actual Phase 1 (`scraper._normalize`) -> Phase 2 (`filter_reviews`)
-  -> Phase 3 (`sample_reviews`) -> Phase 4 (`tag_reviews`) -> Phase 5
-  (`cluster_themes`) in one chain and asserts the schema handoffs hold at
-  every step, not just that each phase works alone.
+  now runs actual Phase 1 (`scraper._normalize`) -> Phase 2
+  (`filter_reviews`) -> Phase 3 (`sample_reviews`) -> Phase 4
+  (`tag_reviews`) -> Phase 5 (`cluster_themes`) -> Phase 6 (`synthesize`)
+  in one chain, for both a normal and a thin timeframe, and asserts the
+  schema handoffs hold at every step — not just that each phase works
+  alone.
 
 ## What's next
 
-Phase 6 — Stage 3 Synthesis, pending explicit approval to start. Also
-still pending: real-network runs of Phase 1's scraper and Phase 4's Grok
-client/batch-size confirmation, and re-running the Phase 2/3/4/5
-spot-checks against that real data once available.
+Phase 8 — Streamlit UI, pending explicit approval to start (Phase 7 was
+already built alongside Phase 4). Also still pending: real-network runs
+of Phase 1's scraper and Phase 4's Grok client/batch-size confirmation,
+and re-running the Phase 2/3/4/5/6 spot-checks against that real data
+once available.

@@ -1,4 +1,4 @@
-"""End-to-end integration: chains real Phase 1-5 functions together
+"""End-to-end integration: chains real Phase 1-6 functions together
 (not hand-rolled shortcuts) to prove each phase's output schema is
 actually consumable by the next phase, not just individually correct.
 """
@@ -12,6 +12,7 @@ from zepto_discovery.filters import filter_reviews
 from zepto_discovery.grok_client import KeyRotator
 from zepto_discovery.sampler import sample_reviews
 from zepto_discovery.scraper import _normalize
+from zepto_discovery.synthesis import RESEARCH_QUESTIONS, synthesize
 from zepto_discovery.tagging import tag_reviews
 
 RUN_DATE = datetime(2026, 8, 2, tzinfo=timezone.utc)
@@ -140,7 +141,35 @@ def fake_stage2_http_post(url, headers, json, timeout):
     return llm_response(_json.dumps(themes))
 
 
-def test_full_pipeline_phase1_through_phase5_integration():
+def fake_stage3_http_post(url, headers, json, timeout):
+    """Deterministic stand-in for Grok's Stage 3 synthesis: cites real
+    review_id/excerpt/theme triples straight out of the theme data it
+    was given, rotating which ones back each question for variety."""
+    content = json["messages"][-1]["content"]
+    themes_json = content.split("Clustered themes:\n", 1)[1].split("\n\nQuestions", 1)[0]
+    themes = _json.loads(themes_json)
+
+    pool = []
+    seen = set()
+    for theme in themes:
+        for ex in theme["example_reviews"]:
+            if ex["review_id"] not in seen:
+                seen.add(ex["review_id"])
+                pool.append({"review_id": ex["review_id"], "excerpt": ex["excerpt"], "theme": theme["name"]})
+
+    k = min(3, len(pool))
+    answers = [
+        {
+            "question": question,
+            "answer": f"Synthesized answer for: {question}",
+            "supporting_reviews": [pool[(i + j) % len(pool)] for j in range(k)],
+        }
+        for i, question in enumerate(RESEARCH_QUESTIONS)
+    ]
+    return llm_response(_json.dumps(answers))
+
+
+def test_full_pipeline_phase1_through_phase6_integration():
     raw = build_synthetic_scrape()
 
     filtered, drop_log = filter_reviews(raw)
@@ -180,3 +209,25 @@ def test_full_pipeline_phase1_through_phase5_integration():
     result_7 = cluster_themes(tagged, rotator, timeframe_days=7, run_date=RUN_DATE, http_post=fake_stage2_http_post)
     assert result_7["pool_size"] <= result_90["pool_size"]
     assert result_7["is_thin"] is True  # realistic small synthetic pool should trip the guard
+
+    # Phase 6 consumes Phase 5's exact output schema (themes + example_review_ids)
+    # directly, plus Phase 4's tagged reviews for excerpt lookup.
+    synthesis_90 = synthesize(result_90, tagged, rotator, run_date=RUN_DATE, http_post=fake_stage3_http_post)
+    assert [a["question"] for a in synthesis_90["answers"]] == RESEARCH_QUESTIONS
+    for answer in synthesis_90["answers"]:
+        assert 3 <= len(answer["supporting_reviews"]) <= 5
+        for support in answer["supporting_reviews"]:
+            assert support["review_id"] in tagged_ids_in_window
+
+    # The thin 7-day window must still produce a fully schema-valid
+    # synthesis (3-5 real supporting reviews per answer), not degraded
+    # or fabricated evidence, per ARCHITECTURE.md's thin-window
+    # requirement carrying through from Stage 2 into Stage 3.
+    synthesis_7 = synthesize(result_7, tagged, rotator, run_date=RUN_DATE, http_post=fake_stage3_http_post)
+    tagged_ids_in_7day_window = {r["review_id"] for r in filter_by_timeframe(tagged, 7, run_date=RUN_DATE)}
+    assert len(synthesis_7["answers"]) == 8
+    assert synthesis_7["is_thin"] is True
+    for answer in synthesis_7["answers"]:
+        assert 3 <= len(answer["supporting_reviews"]) <= 5
+        for support in answer["supporting_reviews"]:
+            assert support["review_id"] in tagged_ids_in_7day_window
