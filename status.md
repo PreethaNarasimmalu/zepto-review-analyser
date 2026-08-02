@@ -2,9 +2,11 @@
 
 ## Current status
 
-Phase 0 (repo scaffolding), Phase 1 (scraping), Phase 2 (filtering), and
-Phase 3 (sampling) complete and tested. Starting Phase 4 (Stage 1
-tagging) next in this same session.
+Phase 0 (repo scaffolding), Phase 1 (scraping), Phase 2 (filtering),
+Phase 3 (sampling), and Phase 4 (Stage 1 tagging, plus the key
+rotation/failover client from Phase 7, built alongside it as the
+architecture doc specifies) complete and tested. Waiting on explicit
+approval before starting Phase 5 (Stage 2 clustering).
 
 ## What's been built
 
@@ -67,6 +69,30 @@ tagging) next in this same session.
   `sample_report_<run_date>.json` (per-stratum eligible vs. sampled
   counts) to `data/sampled/`.
 
+**Phase 4 (+ Phase 7's key rotation/failover, built alongside it)**
+- `zepto_discovery/grok_client.py` — `KeyRotator` round-robins across
+  keys, skipping any on cooldown; `call_with_failover()` tries each
+  available key in turn, cooling one down on any non-2xx response and
+  moving to the next, and raises `AllKeysExhaustedError` (a clear,
+  specific error) if every key is cooling down or fails. `load_api_keys()`
+  reads `st.secrets["GROK_API_KEYS"]` — a single TOML array of 25-30 keys
+  — never hardcoded or from `.env`. `chat_completion()` is the reusable
+  entry point Stage 1/2/3 and Phase 10 all call through.
+- `zepto_discovery/tagging.py` — `batch_reviews()` splits the sampled set
+  into `config.STAGE1_BATCH_SIZE`-sized batches (~6-7 calls at 1,200
+  reviews and the current placeholder size of 175); `build_stage1_messages()`
+  builds the per-batch prompt; `parse_stage1_response()` validates the
+  model's JSON against a required schema (`review_id`, `category`,
+  `sentiment` ∈ {positive, negative, neutral, mixed}, `theme_tags` as a
+  list) and checks every expected `review_id` came back, raising
+  `ValueError` with a specific reason on any mismatch; `tag_batch()`
+  retries once (configurable) by appending a correction message to the
+  conversation before giving up on a batch; `tag_reviews()` runs every
+  batch and merges Stage 1's output back onto each review's original
+  `date`/`rating`/`text` metadata.
+- `save_tagged()` writes `reviews_tagged_<run_date>.json` to
+  `data/tagged/` — this is the schema Phase 5/6/8/10 all read from.
+
 ## Key decisions taken (and why)
 
 - **Flat package layout** (`zepto_discovery/` at repo root, not
@@ -113,13 +139,25 @@ tagging) next in this same session.
   under- or over-shoot the cap by a few reviews when summed; largest
   remainder guarantees the total lands exactly on the cap (or on the
   pool size, if smaller).
+- **`GROK_API_KEYS` as a single TOML array secret**, not 25-30 separate
+  numbered secrets — simpler to load and rotate over, and matches
+  `ARCHITECTURE.md`'s note that the exact key naming convention would be
+  decided during this phase.
+- **A non-2xx response of any kind triggers failover**, not just 429 —
+  the architecture doc says "rate-limit or error," and treating any
+  failure the same way keeps the failover logic simple; a key that's
+  actually broken just cools down and gets retried on the next call
+  rather than blocking the batch.
+- **Malformed-JSON retry is a single follow-up turn in the same
+  conversation** (appends the bad response + a correction request),
+  not a fresh prompt from scratch — gives the model its own mistake to
+  correct against, which is usually more reliable than a cold retry.
 
 ## Testing performed
 
-- `python3 -m pytest -v` — 36/36 tests pass (5 config + 8 scraper + 15
-  filters + 8 sampler).
-- `python3 -m py_compile app/main.py` / `scraper.py` / `filters.py` /
-  `sampler.py` — compile cleanly.
+- `python3 -m pytest -v` — 60/60 tests pass (5 config + 8 scraper + 15
+  filters + 8 sampler + 11 grok_client + 13 tagging).
+- `python3 -m py_compile` on every module — compiles cleanly.
 - Manually verified `.gitignore` behavior: a scratch file dropped into
   `data/raw/` is correctly ignored by `git status`/`git add -A`, while
   each directory's `.gitkeep` is tracked.
@@ -155,9 +193,29 @@ tagging) next in this same session.
   of each other; 1-star (305→182) and 5-star (923→554) both represented
   proportional to their pool share, not artificially balanced; all 3
   recency chunks present in the sample. No anomalies found.
+- **Both `play.google.com` and `api.x.ai` are blocked by this build
+  sandbox's outbound network policy** (confirmed the same way as Phase
+  1's finding: a policy-level 403 on the proxy's own status log). This
+  means the two remaining real-network steps `ARCHITECTURE.md` calls for
+  in Phase 4 — empirically confirming the Stage 1 batch size against
+  Grok's actual JSON reliability, and the one-real-call integration
+  check for `grok_client.py` — **cannot be done in this environment
+  regardless of whether real API keys are supplied here**. Both need to
+  run somewhere with real internet access before Phase 4 is considered
+  fully verified.
+- **Phase 4 spot-check** ran the complete `tag_reviews()` pipeline
+  end-to-end (batching → prompt → JSON parse/validate → metadata merge)
+  against 10 hand-written reviews using a fake, keyword-based stand-in
+  for the LLM (same synthetic-data caveat as Phases 1-3), with
+  `batch_size=2` forcing multiple batches. All 10 came back correctly
+  tagged, batched as expected (4/4/2), and merged with their original
+  date/rating/text intact. This validates the pipeline machinery; it
+  does not validate real Grok output quality, which needs the pending
+  real-network run above.
 
 ## What's next
 
-Phase 4 — Stage 1 Tagging, building now. Also still pending: a
-real-network run of Phase 1's scraper (to get real data), and re-running
-the Phase 2/3 spot-checks against that real data once available.
+Phase 5 — Stage 2 Clustering, pending explicit approval to start. Also
+still pending: real-network runs of Phase 1's scraper and Phase 4's Grok
+client/batch-size confirmation, and re-running the Phase 2/3/4
+spot-checks against that real data once available.
