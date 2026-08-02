@@ -103,6 +103,24 @@ def test_different_seeds_can_produce_different_samples():
 # --- save_sampled --------------------------------------------------------
 
 
+def test_sample_reviews_uses_custom_window_days_for_recency_bucketing():
+    # A review 6 days old should land in the *last* chunk of a 7-day
+    # window (chunk_size ~2.33), but in chunk 0 of the default 90-day
+    # window (chunk_size 30) - confirms window_days actually threads
+    # through sample_reviews rather than silently assuming 90 days.
+    reviews = [make_review("r1", rating=5, days_old=6)]
+
+    _, report_90 = sample_reviews(reviews, cap=1200, run_date=RUN_DATE)
+    _, report_7 = sample_reviews(reviews, cap=1200, run_date=RUN_DATE, window_days=7)
+
+    chunk_90 = report_90["strata"][0]["recency_chunk"]
+    chunk_7 = report_7["strata"][0]["recency_chunk"]
+
+    assert chunk_90 == 0
+    assert chunk_7 == 2
+    assert chunk_90 != chunk_7
+
+
 def test_save_sampled_writes_both_files(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "SAMPLED_DIR", tmp_path)
     sampled = [make_review("r1", rating=5, days_old=1)]

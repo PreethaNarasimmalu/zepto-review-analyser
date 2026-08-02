@@ -96,6 +96,19 @@ def test_call_with_failover_raises_when_all_keys_fail():
         call_with_failover(rotator, request_fn)
 
 
+def test_all_keys_exhausted_error_surfaces_the_real_underlying_cause():
+    # A generic "all keys failed" message is useless for diagnosing why -
+    # invalid key, no billing, bad model name, and genuine rate limits all
+    # look identical without the real HTTP error text included.
+    rotator = KeyRotator(["k1", "k2"])
+
+    def request_fn(key):
+        raise GrokAPIError(404, "model not found: grok-4-fast")
+
+    with pytest.raises(AllKeysExhaustedError, match="model not found: grok-4-fast"):
+        call_with_failover(rotator, request_fn)
+
+
 def test_call_with_failover_raises_when_no_keys_available():
     clock = FakeClock()
     rotator = KeyRotator(["k1"], clock=clock)

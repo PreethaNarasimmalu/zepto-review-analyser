@@ -11,6 +11,12 @@ import time
 import requests
 
 GROK_API_URL = "https://api.x.ai/v1/chat/completions"
+# Best-guess model identifier, never confirmed against a live xAI account
+# (api.x.ai is blocked in the sandbox this was built in). If every key
+# fails identically even with fresh, valid keys, an invalid/retired model
+# name returning a 4xx for every request is a likely cause — check the
+# real error text now surfaced in AllKeysExhaustedError's message, and
+# see https://docs.x.ai/docs/models for the current valid model names.
 DEFAULT_MODEL = "grok-4-fast"
 DEFAULT_COOLDOWN_SECONDS = 60
 
@@ -104,7 +110,8 @@ def call_with_failover(rotator, request_fn):
             "No Grok API keys are currently available — all are cooling down."
         ) from last_exception
     raise AllKeysExhaustedError(
-        "All available Grok API keys failed or were rate-limited for this request."
+        "All available Grok API keys failed or were rate-limited for this "
+        f"request. Last error seen: {last_exception}"
     ) from last_exception
 
 

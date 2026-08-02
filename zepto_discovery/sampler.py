@@ -24,9 +24,9 @@ def recency_chunk(review_date, run_date, window_days=None, chunks=None):
     return min(max(idx, 0), chunks - 1)
 
 
-def _stratum_key(review, run_date):
+def _stratum_key(review, run_date, window_days=None):
     rating = review.get("rating")
-    chunk = recency_chunk(parse_iso_datetime(review["date"]), run_date)
+    chunk = recency_chunk(parse_iso_datetime(review["date"]), run_date, window_days=window_days)
     return (rating, chunk)
 
 
@@ -48,8 +48,13 @@ def _allocate(strata_counts, cap):
     return alloc
 
 
-def sample_reviews(reviews, cap=None, run_date=None, seed=None):
+def sample_reviews(reviews, cap=None, run_date=None, seed=None, window_days=None):
     """Returns (sampled_reviews, report).
+
+    `window_days` should match whatever window the reviews were actually
+    scraped over (defaults to config.TIME_WINDOW_DAYS) — it only affects
+    how recency chunks are sized for stratification, so a smaller real
+    scrape window doesn't silently get bucketed as if it were 90 days.
 
     report captures total eligible/sampled counts, whether the cap was
     reached, and a per-stratum breakdown of eligible vs. sampled counts.
@@ -60,7 +65,7 @@ def sample_reviews(reviews, cap=None, run_date=None, seed=None):
 
     buckets = {}
     for review in reviews:
-        key = _stratum_key(review, run_date)
+        key = _stratum_key(review, run_date, window_days=window_days)
         buckets.setdefault(key, []).append(review)
     for key in buckets:
         buckets[key].sort(key=lambda r: r.get("review_id") or "")

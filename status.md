@@ -16,6 +16,31 @@ scraping, filtering, sampling, tagging, clustering, synthesis, the UI,
 and now ad-hoc re-query — is built, unit-tested, integration-tested
 across the full chain, and (for the UI) browser-tested.
 
+**Post-deployment fixes (during the user's real deployment attempt):**
+- The user hit "All available Grok API keys failed or were rate-limited"
+  on the real deployed app with freshly created keys. Investigation found
+  a real gap: `AllKeysExhaustedError`'s message discarded the actual
+  underlying HTTP error (invalid key, no billing, bad model name, or a
+  genuine rate limit all looked identical). Fixed in `grok_client.py` —
+  the real last error's text is now included directly in the raised
+  message, so it actually surfaces in the UI's `st.error(...)` instead of
+  only being visible in a full traceback. Also flagged in a code comment:
+  `DEFAULT_MODEL = "grok-4-fast"` was always a best guess, never
+  confirmed against a live xAI account (`api.x.ai` is blocked in this
+  sandbox) — if the surfaced error now says something like "model not
+  found," that's the likely actual cause, not the keys themselves.
+- The user also asked whether the pipeline's scrape window was
+  configurable — it wasn't; `run_full_pipeline()` always scraped
+  `config.TIME_WINDOW_DAYS` (90) with no UI control. Added a "Days of
+  reviews to scrape" number input to the sidebar (1-365, default 90),
+  threaded through to both `scrape_reviews()` and `sample_reviews()` —
+  the latter needed a new `window_days` parameter so recency
+  stratification sizes its chunks to whatever window was actually
+  scraped, rather than always assuming 90 days regardless of input.
+- 2 new tests (`test_grok_client.py`, `test_sampler.py`), 122/122 total.
+  Browser-verified the new sidebar control renders and the app is
+  otherwise unaffected.
+
 ## What's been built
 
 **Phase 0**

@@ -35,16 +35,21 @@ TIMEFRAME_LABELS = {7: "Last 7 days", 30: "Last 30 days", 90: "Last 90 days"}
 st.set_page_config(page_title="Zepto Category-Discovery Engine", page_icon="\U0001F5C2", layout="wide")
 
 
-def run_full_pipeline():
+def run_full_pipeline(window_days=None):
     """Phases 1-4: scrape, filter, sample, tag. Run explicitly via the
     sidebar button — the UI never re-runs this automatically. Each
     stage's output is synced to the external store right after it's
     saved locally, so it survives this app's next sleep/redeploy; a
-    sync failure is silent (best-effort) and never blocks the run."""
+    sync failure is silent (best-effort) and never blocks the run.
+
+    window_days controls how far back the scrape goes (default
+    config.TIME_WINDOW_DAYS = 90); it's threaded through to sampling too,
+    so recency stratification is sized to whatever was actually scraped
+    rather than always assuming a 90-day spread."""
     run_date = datetime.now(timezone.utc)
 
-    with st.spinner("Scraping Play Store reviews..."):
-        raw = scrape_reviews(run_date=run_date)
+    with st.spinner(f"Scraping the last {window_days or config.TIME_WINDOW_DAYS} days of Play Store reviews..."):
+        raw = scrape_reviews(run_date=run_date, window_days=window_days)
         path = save_raw(raw, run_date=run_date)
         sync_up(path)
 
@@ -54,7 +59,7 @@ def run_full_pipeline():
         sync_up(filtered_path)
 
     with st.spinner("Sampling..."):
-        sampled, sample_report = sample_reviews(filtered, run_date=run_date)
+        sampled, sample_report = sample_reviews(filtered, run_date=run_date, window_days=window_days)
         sampled_path, _ = save_sampled(sampled, sample_report, run_date=run_date)
         sync_up(sampled_path)
 
@@ -74,9 +79,21 @@ def render_sidebar(run_date):
     else:
         st.sidebar.caption("No completed run yet.")
 
-    if st.sidebar.button("Run new pipeline", help="Scrapes, filters, samples, and tags the last 90 days of reviews."):
+    window_days = st.sidebar.number_input(
+        "Days of reviews to scrape",
+        min_value=1,
+        max_value=365,
+        value=config.TIME_WINDOW_DAYS,
+        step=1,
+        help="How far back to pull Play Store reviews when running a new pipeline.",
+    )
+
+    if st.sidebar.button(
+        "Run new pipeline",
+        help=f"Scrapes, filters, samples, and tags the last {window_days} days of reviews.",
+    ):
         try:
-            new_run_date = run_full_pipeline()
+            new_run_date = run_full_pipeline(window_days=window_days)
             st.sidebar.success(f"Run complete for {new_run_date:%Y-%m-%d}.")
             st.rerun()
         except Exception as e:
