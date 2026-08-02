@@ -35,7 +35,11 @@ TIMEFRAME_LABELS = {7: "Last 7 days", 30: "Last 30 days", 90: "Last 90 days"}
 st.set_page_config(page_title="Zepto Category-Discovery Engine", page_icon="\U0001F5C2", layout="wide")
 
 
-def run_full_pipeline(window_days=None):
+PIPELINE_STAGES = ["Scraping", "Filtering", "Sampling", "Tagging with Grok"]
+SCRAPE_WINDOW_OPTIONS = [7, 14, 30, 60, 90]
+
+
+def run_full_pipeline(progress_bar, window_days=None):
     """Phases 1-4: scrape, filter, sample, tag. Run explicitly via the
     sidebar button — the UI never re-runs this automatically. Each
     stage's output is synced to the external store right after it's
@@ -45,30 +49,38 @@ def run_full_pipeline(window_days=None):
     window_days controls how far back the scrape goes (default
     config.TIME_WINDOW_DAYS = 90); it's threaded through to sampling too,
     so recency stratification is sized to whatever was actually scraped
-    rather than always assuming a 90-day spread."""
+    rather than always assuming a 90-day spread.
+
+    progress_bar is the DeltaGenerator returned by st.progress(), updated
+    in place at each stage so the caller controls where it renders."""
+    n = len(PIPELINE_STAGES)
     run_date = datetime.now(timezone.utc)
 
-    with st.spinner(f"Scraping the last {window_days or config.TIME_WINDOW_DAYS} days of Play Store reviews..."):
-        raw = scrape_reviews(run_date=run_date, window_days=window_days)
-        path = save_raw(raw, run_date=run_date)
-        sync_up(path)
+    def set_stage(i):
+        progress_bar.progress(i / n, text=f"Step {i + 1} of {n}: {PIPELINE_STAGES[i]}...")
 
-    with st.spinner("Filtering low-signal reviews..."):
-        filtered, drop_log = filter_reviews(raw)
-        filtered_path, _ = save_filtered(filtered, drop_log, run_date=run_date)
-        sync_up(filtered_path)
+    set_stage(0)
+    raw = scrape_reviews(run_date=run_date, window_days=window_days)
+    path = save_raw(raw, run_date=run_date)
+    sync_up(path)
 
-    with st.spinner("Sampling..."):
-        sampled, sample_report = sample_reviews(filtered, run_date=run_date, window_days=window_days)
-        sampled_path, _ = save_sampled(sampled, sample_report, run_date=run_date)
-        sync_up(sampled_path)
+    set_stage(1)
+    filtered, drop_log = filter_reviews(raw)
+    filtered_path, _ = save_filtered(filtered, drop_log, run_date=run_date)
+    sync_up(filtered_path)
 
-    with st.spinner("Tagging with Grok (Stage 1)..."):
-        rotator = KeyRotator(load_api_keys())
-        tagged = tag_reviews(sampled, rotator)
-        tagged_path = save_tagged(tagged, run_date=run_date)
-        sync_up(tagged_path)
+    set_stage(2)
+    sampled, sample_report = sample_reviews(filtered, run_date=run_date, window_days=window_days)
+    sampled_path, _ = save_sampled(sampled, sample_report, run_date=run_date)
+    sync_up(sampled_path)
 
+    set_stage(3)
+    rotator = KeyRotator(load_api_keys())
+    tagged = tag_reviews(sampled, rotator)
+    tagged_path = save_tagged(tagged, run_date=run_date)
+    sync_up(tagged_path)
+
+    progress_bar.progress(1.0, text="Done.")
     return run_date
 
 
@@ -79,25 +91,19 @@ def render_sidebar(run_date):
     else:
         st.sidebar.caption("No completed run yet.")
 
-    window_days = st.sidebar.number_input(
+    window_days = st.sidebar.selectbox(
         "Days of reviews to scrape",
-        min_value=1,
-        max_value=365,
-        value=config.TIME_WINDOW_DAYS,
-        step=1,
+        options=SCRAPE_WINDOW_OPTIONS,
+        index=SCRAPE_WINDOW_OPTIONS.index(config.TIME_WINDOW_DAYS),
+        format_func=lambda d: f"Last {d} days",
         help="How far back to pull Play Store reviews when running a new pipeline.",
     )
 
-    if st.sidebar.button(
+    run_clicked = st.sidebar.button(
         "Run new pipeline",
         help=f"Scrapes, filters, samples, and tags the last {window_days} days of reviews.",
-    ):
-        try:
-            new_run_date = run_full_pipeline(window_days=window_days)
-            st.sidebar.success(f"Run complete for {new_run_date:%Y-%m-%d}.")
-            st.rerun()
-        except Exception as e:
-            st.sidebar.error(f"Pipeline run failed: {e}")
+    )
+    return window_days, run_clicked
 
 
 def render_funnel(run_date):
@@ -186,13 +192,22 @@ def main():
         st.session_state["synced_down"] = True
 
     run_date = latest_run_date()
-    render_sidebar(run_date)
+    window_days, run_clicked = render_sidebar(run_date)
+
+    if run_clicked:
+        progress_bar = st.progress(0, text=f"Step 1 of {len(PIPELINE_STAGES)}: {PIPELINE_STAGES[0]}...")
+        try:
+            new_run_date = run_full_pipeline(progress_bar, window_days=window_days)
+            st.success(f"Run complete for {new_run_date:%Y-%m-%d}.")
+            run_date = new_run_date
+        except Exception as e:
+            st.error(f"Pipeline run failed: {e}")
 
     if run_date is None:
         st.info(
             "No completed pipeline run found yet. Click **Run new pipeline** "
-            "in the sidebar to scrape, filter, sample, and tag the last 90 "
-            "days of reviews."
+            f"in the sidebar to scrape, filter, sample, and tag the last "
+            f"{window_days} days of reviews."
         )
         return
 
