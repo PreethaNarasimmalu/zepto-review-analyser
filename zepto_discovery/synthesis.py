@@ -177,20 +177,20 @@ def synthesize(themes_result, tagged_reviews, rotator, run_date=None, http_post=
     }
 
 
-def _answers_path(run_date, timeframe_days):
+def answers_path(run_date, timeframe_days):
     config.SYNTHESIS_DIR.mkdir(parents=True, exist_ok=True)
     return config.SYNTHESIS_DIR / f"answers_{run_date:%Y-%m-%d}_{timeframe_days}d.json"
 
 
 def save_answers(result, run_date=None):
     run_date = run_date or datetime.now(timezone.utc)
-    path = _answers_path(run_date, result["timeframe_days"])
+    path = answers_path(run_date, result["timeframe_days"])
     path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
     return path
 
 
 def load_answers(run_date, timeframe_days):
-    path = _answers_path(run_date, timeframe_days)
+    path = answers_path(run_date, timeframe_days)
     if not path.exists():
         return None
     return json.loads(path.read_text())

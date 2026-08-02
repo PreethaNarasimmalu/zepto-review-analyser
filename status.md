@@ -2,12 +2,15 @@
 
 ## Current status
 
-Phases 0-7 complete and tested (repo scaffolding, scraping, filtering,
-sampling, Stage 1 tagging + key rotation/failover, Stage 2 clustering,
-Stage 3 synthesis), plus Phase 8 (Streamlit UI) — built, unit-tested,
-and actually launched and driven in a real browser via Playwright to
-confirm it works, not just that it compiles. Waiting on explicit
-approval before starting Phase 9 (Deployment).
+Phases 0-8 complete and tested. Phase 9 (Deployment) is built as far as
+it can be from inside this sandbox: pinned dependencies, the Supabase
+persistence layer the earlier storage decision was missing, a secrets
+template, and a full deployment runbook (`DEPLOYMENT.md`). **The actual
+deploy — creating your Supabase project, creating the Streamlit
+Community Cloud app, and entering real secrets — is a manual step only
+you can do**, detailed step-by-step in `DEPLOYMENT.md`. Everything up to
+that point has been built and tested; nothing further can happen here
+without your Streamlit/Supabase accounts and real API keys.
 
 ## What's been built
 
@@ -182,6 +185,36 @@ approval before starting Phase 9 (Deployment).
   architecture diagram, applied via Streamlit's standard theme config
   rather than custom CSS injection.
 
+**Phase 9**
+- `zepto_discovery/external_store.py` — resolves the persistence gap
+  flagged (but deferred) back in Phase 5/6: mirrors `config.DATA_DIR`
+  into a Supabase Storage bucket via its REST API directly through
+  `requests` (same pattern as `grok_client.py`, no extra SDK dependency).
+  `upload_file()`/`download_file()`/`list_remote_files()` raise clear
+  errors and are unit-tested against an injectable fake session;
+  `sync_up()`/`sync_down_all()` are the best-effort wrappers actually
+  used by the app — they swallow any failure and return a status value
+  instead of raising, since losing durability is an acceptable
+  degradation but crashing the app is not.
+- Made `clustering.themes_path()` and `synthesis.answers_path()` public
+  (were private, `_themes_path`/`_answers_path`) so `app/main.py` can
+  sync those specific files without reaching into another module's
+  internals.
+- Wired into `app/main.py`: `sync_down_all()` runs once per session at
+  startup (pulls back anything missing locally after a restart);
+  `sync_up()` runs after every local save in `run_full_pipeline()` and
+  after computing a new timeframe.
+- `requirements.txt` pinned to exact installed versions
+  (`streamlit==1.60.0`, `google-play-scraper==1.2.7`,
+  `requests==2.33.1`, `pytest==9.1.1`) for deployment reproducibility.
+- `.streamlit/secrets.toml.example` documents the required secrets
+  (`GROK_API_KEYS`, `SUPABASE_URL`, `SUPABASE_KEY`) without containing
+  real values.
+- `DEPLOYMENT.md` — a step-by-step runbook for the manual parts only the
+  user can do (Supabase project + bucket creation, Streamlit Community
+  Cloud app creation, entering real secrets), plus a smoke-test
+  checklist matching `ARCHITECTURE.md`'s Phase 9 testing requirement.
+
 ## Key decisions taken (and why)
 
 - **Flat package layout** (`zepto_discovery/` at repo root, not
@@ -285,12 +318,34 @@ approval before starting Phase 9 (Deployment).
   Zepto brand palette — simpler, and Streamlit already re-applies it
   consistently across all built-in widgets (radio buttons, buttons,
   expanders) rather than needing every component individually restyled.
+- **The external store is additive, implemented as a thin sync layer in
+  `app/main.py`, not a rewrite of Phases 1-6's save/load functions.**
+  Every phase's existing, already-tested `save_*`/`load_*` functions are
+  untouched; `sync_up()`/`sync_down_all()` just mirror whatever's on
+  local disk to/from the bucket around the existing calls. Lower
+  risk than threading Supabase calls through six already-working
+  modules, at the cost of the sync living in the UI layer rather than
+  inside each phase itself.
+- **Sync failures are silent by design** (`sync_up`/`sync_down_all`
+  return a status value, never raise) — durability surviving a
+  Streamlit restart is a nice-to-have; a pipeline run or page load that
+  otherwise succeeded must never fail because of it.
+- **Storage REST calls via `requests`, not the `supabase-py` SDK** —
+  consistent with how `grok_client.py` is built, avoids a heavier
+  dependency, and keeps the same injectable-session testing pattern
+  used everywhere else in this codebase. The exact request/response
+  shape is my best understanding of Supabase's Storage API and hasn't
+  been verified against a real project (`supabase.com` is blocked by
+  this sandbox's network policy, same as `play.google.com`/`api.x.ai`)
+  — flagged explicitly in `DEPLOYMENT.md`'s smoke-test checklist as the
+  first real-world check.
 
 ## Testing performed
 
-- `python3 -m pytest -v` — 101/101 tests pass (5 config + 8 scraper + 15
+- `python3 -m pytest -v` — 109/109 tests pass (5 config + 8 scraper + 15
   filters + 8 sampler + 11 grok_client + 13 tagging + 17 clustering + 15
-  synthesis + 8 run_data + 1 full Phase 1-6 integration test).
+  synthesis + 8 run_data + 8 external_store + 1 full Phase 1-6
+  integration test).
 - `python3 -m py_compile` on every module — compiles cleanly.
 - Manually verified `.gitignore` behavior: a scratch file dropped into
   `data/raw/` is correctly ignored by `git status`/`git add -A`, while
@@ -411,10 +466,35 @@ approval before starting Phase 9 (Deployment).
   fall under the 50-review threshold. The underlying flag is unit-tested
   directly; only the one-line `st.warning(...)` rendering itself wasn't
   screenshotted.
+- **Phase 9 testing, within this sandbox's limits**: pinned
+  `requirements.txt` re-installs cleanly with no resolver conflicts.
+  Re-launched the app in a real browser with `external_store` wired in —
+  renders identically to before (Supabase unreachable here, so
+  `sync_down_all()`/`sync_up()` correctly no-op rather than breaking
+  anything). Simulated a genuinely fresh deploy (emptied `data/` back to
+  just `.gitkeep`s, removed any local `secrets.toml`) and confirmed the
+  app boots cleanly to an empty-state message — no missing-secret or
+  import error on load, matching `ARCHITECTURE.md`'s smoke-test
+  requirement. Clicked "Run new pipeline" in that fresh state too: fails
+  on the network block as expected, with the same clean sidebar error as
+  before (the code never reaches the point where a missing
+  `GROK_API_KEYS` secret would be the reported error, since the scrape
+  step fails first every time in this sandbox — noted honestly rather
+  than claimed as verified).
+- **What Phase 9 cannot include from inside this sandbox**: creating the
+  actual Supabase project/bucket, creating the actual Streamlit
+  Community Cloud app, entering real secrets, and the resulting
+  real-world smoke test (`DEPLOYMENT.md`'s checklist) — all of that
+  needs the user's own accounts and is documented step-by-step there
+  instead of attempted here.
 
 ## What's next
 
-Phase 9 — Deployment, pending explicit approval to start. Also still
-pending: real-network runs of Phase 1's scraper and Phase 4's Grok
-client/batch-size confirmation, and re-running the Phase 2/3/4/5/6
-spot-checks against that real data once available.
+Deployment itself (the manual steps in `DEPLOYMENT.md`) is up to the
+user now — nothing further to build there without real accounts/keys.
+Pending the user's go-ahead: Phase 10 (re-query), which is the only
+remaining phase in `ARCHITECTURE.md`. Also still outstanding, same as
+every phase since Phase 1: real-network runs of the scraper and Grok
+client (including the batch-size confirmation), and re-running the
+Phase 2-6 spot-checks against that real data once available — all
+achievable once the app is actually deployed per `DEPLOYMENT.md`.

@@ -168,20 +168,20 @@ def cluster_themes(
     }
 
 
-def _themes_path(run_date, timeframe_days):
+def themes_path(run_date, timeframe_days):
     config.CLUSTERED_DIR.mkdir(parents=True, exist_ok=True)
     return config.CLUSTERED_DIR / f"themes_{run_date:%Y-%m-%d}_{timeframe_days}d.json"
 
 
 def save_themes(result, run_date=None):
     run_date = run_date or datetime.now(timezone.utc)
-    path = _themes_path(run_date, result["timeframe_days"])
+    path = themes_path(run_date, result["timeframe_days"])
     path.write_text(json.dumps(result, indent=2, ensure_ascii=False))
     return path
 
 
 def load_themes(run_date, timeframe_days):
-    path = _themes_path(run_date, timeframe_days)
+    path = themes_path(run_date, timeframe_days)
     if not path.exists():
         return None
     return json.loads(path.read_text())

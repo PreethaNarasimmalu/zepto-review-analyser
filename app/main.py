@@ -13,6 +13,8 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from zepto_discovery import config
+from zepto_discovery.clustering import themes_path
+from zepto_discovery.external_store import sync_down_all, sync_up
 from zepto_discovery.filters import filter_reviews, save_filtered
 from zepto_discovery.grok_client import KeyRotator, load_api_keys
 from zepto_discovery.run_data import (
@@ -24,6 +26,7 @@ from zepto_discovery.run_data import (
 )
 from zepto_discovery.sampler import sample_reviews, save_sampled
 from zepto_discovery.scraper import save_raw, scrape_reviews
+from zepto_discovery.synthesis import answers_path
 from zepto_discovery.tagging import save_tagged, tag_reviews
 
 TIMEFRAME_LABELS = {7: "Last 7 days", 30: "Last 30 days", 90: "Last 90 days"}
@@ -33,25 +36,32 @@ st.set_page_config(page_title="Zepto Category-Discovery Engine", page_icon="\U00
 
 def run_full_pipeline():
     """Phases 1-4: scrape, filter, sample, tag. Run explicitly via the
-    sidebar button — the UI never re-runs this automatically."""
+    sidebar button — the UI never re-runs this automatically. Each
+    stage's output is synced to the external store right after it's
+    saved locally, so it survives this app's next sleep/redeploy; a
+    sync failure is silent (best-effort) and never blocks the run."""
     run_date = datetime.now(timezone.utc)
 
     with st.spinner("Scraping Play Store reviews..."):
         raw = scrape_reviews(run_date=run_date)
-        save_raw(raw, run_date=run_date)
+        path = save_raw(raw, run_date=run_date)
+        sync_up(path)
 
     with st.spinner("Filtering low-signal reviews..."):
         filtered, drop_log = filter_reviews(raw)
-        save_filtered(filtered, drop_log, run_date=run_date)
+        filtered_path, _ = save_filtered(filtered, drop_log, run_date=run_date)
+        sync_up(filtered_path)
 
     with st.spinner("Sampling..."):
         sampled, sample_report = sample_reviews(filtered, run_date=run_date)
-        save_sampled(sampled, sample_report, run_date=run_date)
+        sampled_path, _ = save_sampled(sampled, sample_report, run_date=run_date)
+        sync_up(sampled_path)
 
     with st.spinner("Tagging with Grok (Stage 1)..."):
         rotator = KeyRotator(load_api_keys())
         tagged = tag_reviews(sampled, rotator)
-        save_tagged(tagged, run_date=run_date)
+        tagged_path = save_tagged(tagged, run_date=run_date)
+        sync_up(tagged_path)
 
     return run_date
 
@@ -92,6 +102,8 @@ def render_timeframe_view(run_date, timeframe_days):
                 with st.spinner("Clustering and synthesizing (one-time Grok calls for this window)..."):
                     rotator = KeyRotator(load_api_keys())
                     ensure_timeframe_computed(run_date, timeframe_days, tagged, rotator)
+                    sync_up(themes_path(run_date, timeframe_days))
+                    sync_up(answers_path(run_date, timeframe_days))
                 st.rerun()
             except Exception as e:
                 st.error(f"Couldn't analyze this timeframe: {e}")
@@ -138,6 +150,10 @@ def main():
         "Why don't Zepto shoppers explore new categories? Answers synthesized "
         "from Play Store reviews, every claim traceable to source text."
     )
+
+    if "synced_down" not in st.session_state:
+        sync_down_all()
+        st.session_state["synced_down"] = True
 
     run_date = latest_run_date()
     render_sidebar(run_date)

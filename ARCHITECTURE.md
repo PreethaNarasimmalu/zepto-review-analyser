@@ -457,11 +457,16 @@ Stage 3 answers.
   and filtered reviews (Phases 1–2) are transient and don't need to
   survive this — local temp files are enough. What *does* need to
   survive is the data Phase 8 shows by default: tagged reviews (Phase 4)
-  and each timeframe's themes/synthesis (Phases 5–6). That's written to
-  an **external store** (e.g. Supabase Postgres/Storage, or an
-  equivalent lightweight hosted store) via credentials in `st.secrets`,
-  the same pattern as the Grok keys — not committed to the repo. Exact
-  provider/schema confirmed during Phase 4's build.
+  and each timeframe's themes/synthesis (Phases 5–6). **Implemented in
+  Phase 9** as a Supabase Storage bucket (`zepto-discovery-data`),
+  synced via `zepto_discovery/external_store.py`: every locally-saved
+  file is pushed there right after writing (best-effort — a sync
+  failure never blocks a pipeline run), and the app pulls down anything
+  missing locally once at startup. Credentials (`SUPABASE_URL`,
+  `SUPABASE_KEY`) live in `st.secrets`, same pattern as the Grok keys —
+  see `.streamlit/secrets.toml.example`. This is additive, not a
+  rewrite: Phases 1–6's own save/load functions are unchanged and still
+  read/write local disk exactly as before.
 - **Visual identity.** Phase 8's UI is themed around Zepto's own brand
   palette (violet-purple primary + white/near-black neutrals + a bright
   accent for highlights) rather than a generic dashboard look, since the
