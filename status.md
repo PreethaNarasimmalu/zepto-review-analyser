@@ -2,9 +2,9 @@
 
 ## Current status
 
-Phase 0 (repo scaffolding), Phase 1 (scraping), and Phase 2 (filtering)
-complete and tested. Waiting on explicit approval before starting Phase 3
-(sampling).
+Phase 0 (repo scaffolding), Phase 1 (scraping), Phase 2 (filtering), and
+Phase 3 (sampling) complete and tested. Starting Phase 4 (Stage 1
+tagging) next in this same session.
 
 ## What's been built
 
@@ -50,6 +50,23 @@ complete and tested. Waiting on explicit approval before starting Phase 3
 - `save_filtered()` writes `reviews_filtered_<run_date>.json` and
   `drop_log_<run_date>.json` to `data/filtered/`.
 
+**Phase 3**
+- `zepto_discovery/sampler.py` — stratifies filtered reviews by
+  `(star rating, recency chunk)` (3 chunks across the 90-day window),
+  then allocates the 1,200-review cap proportionally across strata using
+  a largest-remainder method (so the cap is hit exactly, not just
+  approximately, while never allocating more than a stratum actually
+  has).
+- Deterministic: a fixed seed (`config.RANDOM_SEED = 42`, overridable)
+  drives `random.sample()` within each stratum, and each stratum's pool
+  is sorted by `review_id` before sampling so the same input always
+  produces the same output.
+- If the eligible pool is at or under the cap, every review is kept and
+  `used_full_pool` is set in the report.
+- `save_sampled()` writes `reviews_sampled_<run_date>.json` and
+  `sample_report_<run_date>.json` (per-stratum eligible vs. sampled
+  counts) to `data/sampled/`.
+
 ## Key decisions taken (and why)
 
 - **Flat package layout** (`zepto_discovery/` at repo root, not
@@ -91,13 +108,18 @@ complete and tested. Waiting on explicit approval before starting Phase 3
   below) in exchange for near-zero risk of dropping a substantive one —
   the safer failure mode for a pre-LLM filter that isn't the final
   quality bar.
+- **Largest-remainder allocation, not simple rounding**, for splitting
+  the 1,200 cap across up to 15 strata — plain `round()` per stratum can
+  under- or over-shoot the cap by a few reviews when summed; largest
+  remainder guarantees the total lands exactly on the cap (or on the
+  pool size, if smaller).
 
 ## Testing performed
 
-- `python3 -m pytest -v` — 28/28 tests pass (5 config + 8 scraper + 15
-  filters).
-- `python3 -m py_compile app/main.py` / `scraper.py` / `filters.py` —
-  compile cleanly.
+- `python3 -m pytest -v` — 36/36 tests pass (5 config + 8 scraper + 15
+  filters + 8 sampler).
+- `python3 -m py_compile app/main.py` / `scraper.py` / `filters.py` /
+  `sampler.py` — compile cleanly.
 - Manually verified `.gitignore` behavior: a scratch file dropped into
   `data/raw/` is correctly ignored by `git status`/`git add -A`, while
   each directory's `.gitkeep` is tracked.
@@ -125,9 +147,17 @@ complete and tested. Waiting on explicit approval before starting Phase 3
   ~30-kept/~30-dropped spot-check `ARCHITECTURE.md` calls for — it still
   needs to be re-run against actual filtered Zepto reviews once Phase 1
   has real data.
+- **Phase 3 spot-check** ran `sample_reviews()` against a synthetic pool
+  of 2,000 reviews with a realistic ratings skew (45% 5-star, 20% 4-star,
+  10% 3-star, 10% 2-star, 15% 1-star, uniformly spread across the 90-day
+  window) — same stand-in-for-real-data caveat as Phases 1–2. Result: all
+  15 strata sampled at ~60% (1,200/2,000) within a fraction of a percent
+  of each other; 1-star (305→182) and 5-star (923→554) both represented
+  proportional to their pool share, not artificially balanced; all 3
+  recency chunks present in the sample. No anomalies found.
 
 ## What's next
 
-Phase 3 — Sampling, pending explicit approval to start. Also pending: a
-real-network run of Phase 1's scraper (to get real data), followed by
-re-running Phase 2's spot-check against that real, filtered output.
+Phase 4 — Stage 1 Tagging, building now. Also still pending: a
+real-network run of Phase 1's scraper (to get real data), and re-running
+the Phase 2/3 spot-checks against that real data once available.
