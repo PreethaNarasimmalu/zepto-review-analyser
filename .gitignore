@@ -1,0 +1,23 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
+
+# Never commit secrets — these come from Streamlit's secrets manager
+.streamlit/secrets.toml
+
+# Pipeline data is regenerated per run; tagged/clustered/synthesis outputs
+# are persisted to the external store instead, not to git (see ARCHITECTURE.md §3)
+data/raw/*
+data/filtered/*
+data/sampled/*
+data/tagged/*
+data/clustered/*
+data/synthesis/*
+!data/raw/.gitkeep
+!data/filtered/.gitkeep
+!data/sampled/.gitkeep
+!data/tagged/.gitkeep
+!data/clustered/.gitkeep
+!data/synthesis/.gitkeep
