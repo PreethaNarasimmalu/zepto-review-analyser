@@ -186,14 +186,20 @@ bucket, before and after sampling).
   "return valid JSON only" reminder before failing that batch loudly).
 - Persist output with full metadata per review (review ID, date, star
   rating, category, sentiment, theme tags) in a structured store
-  (JSON/Parquet) — this is the data Phase 10's re-query capability reads
-  from later, so schema needs to be stable and self-describing.
+  (JSON/Parquet) — this is the data Phase 10's re-query capability, and
+  the Phase 8 timeframe selector, both read from later, so schema needs
+  to be stable and self-describing.
+- Written both to local disk (for the run in progress) and to the
+  external persistence store (see §3 Storage & persistence) so it
+  survives a Streamlit Community Cloud restart — this is the single
+  90-day tagged pool everything downstream filters from.
 - Uses the key-rotation/failover client from Phase 7.
 
 **Inputs:** `data/sampled/reviews_sampled_<run_date>.json`, Grok API keys
 via `st.secrets`.
-**Outputs:** `data/tagged/reviews_tagged_<run_date>.json` — one record per
-review with original metadata + Stage 1 tags.
+**Outputs:** `data/tagged/reviews_tagged_<run_date>.json` locally, plus
+the same records upserted to the external store, keyed by run date —
+one record per review with original metadata + Stage 1 tags.
 
 **Testing:**
 - Dry run against a small hand-picked batch (~20 reviews) to validate
@@ -209,40 +215,67 @@ review with original metadata + Stage 1 tags.
 
 ---
 
-## Phase 5 — Stage 2: Clustering (1 LLM call)
+## Phase 5 — Stage 2: Clustering (1 LLM call per timeframe, cached)
 
 **What's built:**
 - Aggregate Stage 1's raw tags (not raw review text) into a frequency-
   ranked tag list to keep the prompt compact enough for a single call.
-- One LLM call: group tags into 8–12 higher-level themes, bottom-up
-  (themes emerge from the tag data itself — the 8 research questions are
-  **not** given to the model as pre-set buckets, to avoid confirmation
-  bias, per spec).
+- **Parameterized by timeframe.** The scrape/sample/tag steps (Phases
+  1–4) run once, at the full 90-day window. Clustering itself is run
+  separately per timeframe the Phase 8 UI exposes — 7 days / 30 days /
+  90 days — by filtering the tagged pool down to reviews whose stored
+  date falls inside that window *before* aggregating tags. This is not
+  a re-sample: it's a date filter over the one tagged pool.
+- One LLM call per timeframe: group that window's tags into 8–12
+  higher-level themes, bottom-up (themes emerge from the tag data itself
+  — the 8 research questions are **not** given to the model as pre-set
+  buckets, to avoid confirmation bias, per spec).
 - Output per theme: theme name/description, frequency count, and linked
   example review IDs (so Stage 3 and the validation requirement can trace
   back to source).
+- Computed lazily: only runs the first time a given timeframe is
+  requested (default 90 days runs as part of the main pipeline; 7-day
+  and 30-day only run if/when someone picks them in the UI), then the
+  result is cached (external store) so re-selecting the same timeframe
+  later costs zero LLM calls.
+- **Thin-window guard:** if the filtered pool for a timeframe falls below
+  a minimum size (e.g. ~50 reviews), record that alongside the theme
+  output so Phase 8 can surface a "small sample, interpret with caution"
+  notice rather than silently presenting it as equally robust.
 
-**Inputs:** `data/tagged/reviews_tagged_<run_date>.json`.
-**Outputs:** `data/clustered/themes_<run_date>.json` — 8–12 themes with
-counts and example review ID lists.
+**Inputs:** tagged pool (external store or local), a timeframe (7/30/90
+days).
+**Outputs:** `themes_<run_date>_<timeframe>.json` — 8–12 themes with
+counts, example review ID lists, and the filtered pool size.
 
 **Testing:**
-- Real run against actual Stage 1 output (no meaningful way to unit-test
-  LLM clustering quality; validation is manual).
+- Unit test: date-filter function against a synthetic tagged pool,
+  confirm correct reviews included/excluded at each window boundary.
+- Real run against actual Stage 1 output for all three timeframes (no
+  meaningful way to unit-test LLM clustering quality; validation is
+  manual).
 - Manual review: for each theme, pull 3–5 linked example reviews and
   confirm they actually belong to that theme (this is a dry run of the
   Phase-6 validation requirement, done one stage early to catch
   clustering problems before synthesis compounds them).
 - Sanity check theme count is within 8–12 and no theme is a near-empty
-  outlier or a catch-all "other" bucket that swallows too much signal.
+  outlier or a catch-all "other" bucket that swallows too much signal,
+  for each of the three timeframes.
+- Confirm the 7-day window actually triggers the thin-window guard on
+  realistic data, and that re-selecting a cached timeframe makes no new
+  LLM call.
 
 ---
 
-## Phase 6 — Stage 3: Synthesis (1 LLM call)
+## Phase 6 — Stage 3: Synthesis (1 LLM call per timeframe, cached)
 
 **What's built:**
-- One LLM call fed clustered themes + counts + example reviews, prompted
-  to answer the 8 fixed research questions:
+- Same timeframe parameterization as Phase 5: one call per timeframe
+  (7/30/90 days), computed lazily on first request and cached — the
+  90-day answer is produced as part of the main run; 7-day/30-day only
+  get computed if a user actually selects them in the UI.
+- One LLM call fed that timeframe's clustered themes + counts + example
+  reviews, prompted to answer the 8 fixed research questions:
   1. Why do users repeatedly buy from the same categories?
   2. What prevents users from exploring new categories?
   3. How do users discover products today?
@@ -261,18 +294,21 @@ counts and example review ID lists.
   the tagged dataset — reject/flag the response if not, rather than
   silently shipping an unsupported claim.
 
-**Inputs:** `data/clustered/themes_<run_date>.json`, tagged reviews (for
+**Inputs:** `themes_<run_date>_<timeframe>.json`, tagged reviews (for
 excerpt lookup).
-**Outputs:** `data/synthesis/answers_<run_date>.json`.
+**Outputs:** `answers_<run_date>_<timeframe>.json`.
 
 **Testing:**
 - Unit test: the post-call validator against a hand-crafted malformed
   response (missing supporting reviews, invalid review ID) — confirm it
   flags correctly.
-- Real run: full synthesis call, manual read-through of all 8 answers
-  against their linked source reviews to confirm the evidence actually
-  supports the claim (this is the spec's explicit spot-check
-  requirement).
+- Real run: full synthesis call for all three timeframes, manual
+  read-through of all 8 answers per timeframe against their linked
+  source reviews to confirm the evidence actually supports the claim
+  (this is the spec's explicit spot-check requirement).
+- Confirm the thin-window guard from Phase 5 carries through: a
+  low-evidence timeframe's answers are still schema-valid (3–5 sources
+  where available) rather than fabricating filler support.
 
 ---
 
@@ -311,22 +347,41 @@ structure — exact key naming convention confirmed during this phase.
   - Pipeline run controls (trigger a run, or load a previous run's
     saved outputs — reruns are expensive, so the UI defaults to showing
     the last completed run rather than re-running by default).
+  - **Timeframe selector** — last 7 / 30 / 90 days. Switching it filters
+    to that window's Phase 5/6 output; if that window hasn't been
+    computed yet, it triggers the one-time clustering + synthesis calls
+    described in Phases 5–6 (a short spinner, not a full pipeline
+    re-run), then caches the result. Shows the filtered pool size next
+    to the selector, and a visible caution notice when a window falls
+    under the thin-window guard threshold.
   - The 8 research questions with answers and their linked supporting
     reviews (expandable, so raw text is inspectable — this is where the
     validation requirement becomes visible to the end user, not just to
-    the pipeline).
+    the pipeline), scoped to the selected timeframe.
   - Theme browser (Stage 2 output): themes with frequency and example
-    reviews.
-  - Ad-hoc question box wired to Phase 10's re-query capability.
+    reviews, scoped to the selected timeframe.
+  - Ad-hoc question box wired to Phase 10's re-query capability, also
+    scoped to the selected timeframe.
   - Basic run metadata (review counts at each stage: scraped → filtered
     → sampled → tagged, so funnel drop-off is visible).
+- **Visual theme:** styled around Zepto's own brand identity (violet-
+  purple primary, white/near-black neutrals, bright accent used
+  sparingly for highlights) so the tool visually reads as "about Zepto"
+  rather than a generic dashboard — exact palette confirmed against
+  Zepto's brand assets before this phase is built, since it couldn't be
+  scraped programmatically (site blocks automated fetches).
 
-**Inputs:** JSON outputs from Phases 1–6 (and Phase 10 on demand).
+**Inputs:** JSON outputs from Phases 1–6 (and Phase 10 on demand), read
+from the external store described in §3.
 **Outputs:** Running Streamlit app.
 
 **Testing:**
 - Manual click-through of every view against a real completed run's
   data, in a local `streamlit run` session.
+- Manually verify all three timeframes: switching produces the right
+  filtered data, first-time selection shows a spinner and triggers
+  exactly the expected number of new LLM calls, repeat selection makes
+  none.
 - Confirm secrets are read via `st.secrets` and the app doesn't crash
   when a key is temporarily rate-limited (failover is invisible to the
   UI).
@@ -337,8 +392,9 @@ structure — exact key naming convention confirmed during this phase.
 
 **What's built:**
 - Deployment to Streamlit Community Cloud (or confirmed alternative),
-  with the 25–30 Grok keys configured as Streamlit secrets in the
-  deployed app's settings (not committed to the repo).
+  with the 25–30 Grok keys **and** the external store's credentials
+  (see §3) configured as Streamlit secrets in the deployed app's
+  settings — neither committed to the repo.
 - `requirements.txt` finalized/pinned for the deployed environment.
 
 **Inputs:** Tested app from Phase 8.
@@ -388,7 +444,27 @@ Stage 3 answers.
   given before starting it.
 - **No phase begins — including Phase 0 — until this document is
   explicitly approved.**
-- **LLM call budget check:** Phases 4 (6–7 calls) + 5 (1 call) + 6 (1
-  call) = 8–9 calls per full pipeline run, within the 5–10 call target.
-  Phase 10 ad-hoc queries are additional, on-demand, one call each, by
-  design (not part of the "full run" budget).
+- **LLM call budget check:** the main pipeline run — Phase 4 (6–7 calls)
+  + Phase 5 @ 90 days (1 call) + Phase 6 @ 90 days (1 call) — is 8–9
+  calls, within the 5–10 call target. Selecting the 7-day or 30-day
+  timeframe for the first time adds 2 calls each (one Phase 5 + one
+  Phase 6 call for that window), computed lazily and cached, so they're
+  outside the "full run" budget by design — same treatment as Phase 10's
+  ad-hoc queries (1 call each).
+- **Storage & persistence.** Streamlit Community Cloud's filesystem is
+  ephemeral — anything not committed to git disappears when the app
+  sleeps or redeploys, and it re-clones fresh from GitHub on wake. Raw
+  and filtered reviews (Phases 1–2) are transient and don't need to
+  survive this — local temp files are enough. What *does* need to
+  survive is the data Phase 8 shows by default: tagged reviews (Phase 4)
+  and each timeframe's themes/synthesis (Phases 5–6). That's written to
+  an **external store** (e.g. Supabase Postgres/Storage, or an
+  equivalent lightweight hosted store) via credentials in `st.secrets`,
+  the same pattern as the Grok keys — not committed to the repo. Exact
+  provider/schema confirmed during Phase 4's build.
+- **Visual identity.** Phase 8's UI is themed around Zepto's own brand
+  palette (violet-purple primary + white/near-black neutrals + a bright
+  accent for highlights) rather than a generic dashboard look, since the
+  tool exists to analyze that specific app. Exact hex values confirmed
+  against Zepto's brand assets before Phase 8 starts, if better sources
+  than public recollection are available.
